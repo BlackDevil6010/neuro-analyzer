@@ -4,6 +4,14 @@ export interface ReferenceValues {
     velocity: number;
 }
 
+export interface PDFCoordinates {
+    pageIndex: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
 export interface ExtractedValue {
     id: string;
     nerve: string;
@@ -13,12 +21,19 @@ export interface ExtractedValue {
     value: number | null;
     unit: string;
     isCorrected?: boolean;
-    coordinates?: {
-        pageIndex: number;
-        x: number;
-        y: number;
-        width?: number;
-    };
+    coordinates?: PDFCoordinates;
+}
+
+export interface DurationAnalysis {
+    isBaseline: boolean;
+    baselineValue?: number;
+    diff?: number;
+    diffFormatted?: string;       // e.g. "+1.94 ms" or "-0.34 ms"
+    diffPct?: number;
+    diffPctFormatted?: string;    // e.g. "+38.65%" or "-7.66%"
+    hasEquivalent: boolean;       // diffPct > 30
+    equivPct?: number;
+    equivPctFormatted?: string;   // e.g. "138.65%"
 }
 
 export interface MotorNCSSiteData {
@@ -28,7 +43,9 @@ export interface MotorNCSSiteData {
     latency: number | string | null;
     amplitudeValId?: string;
     amplitude: number | string | null;
+    durationValId?: string;
     duration: number | string | null;
+    durationAnalysis?: DurationAnalysis;
     relAmp: number | string | null;
     segment: string;
     latDiff: number | string | null;
@@ -51,6 +68,22 @@ export interface CalculatedValue {
     value: number;
     unit: string;
     formatted: string;
+    diffPctFormatted?: string;
+    equivPctFormatted?: string;
+    coordinates?: PDFCoordinates;
+    isAbnormal?: boolean;
+}
+
+export interface FWaveRow {
+    nerve: string;
+    fLat: number | null;
+    mLat: number | null;
+    fMinusMLat: number | null;
+    minMLat: number | null;
+    refValue?: number;
+    pct?: number;
+    diff?: number;
+    isProlonged?: boolean;
 }
 
 export interface Report {
@@ -75,6 +108,7 @@ export interface Report {
     extractedValues: ExtractedValue[];
     calculatedValues: CalculatedValue[];
     motorNcsGroups?: MotorNCSGroup[];
+    fWaveRows?: FWaveRow[];
     analysisStatus: 'pending' | 'completed' | 'error';
     fileData?: ArrayBuffer;
     fileType?: string;

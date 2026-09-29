@@ -100,41 +100,97 @@ export function getNerveReference(nerve?: string, fallbackRefs?: ReferenceValues
     };
 }
 
+export function calculateDurationAnalysis(
+    currentDuration: number | null | undefined | string,
+    baselineDuration: number | null | undefined
+): import('../types/report').DurationAnalysis | null {
+    if (currentDuration === null || currentDuration === undefined || currentDuration === 'NR') return null;
+    const cur = typeof currentDuration === 'number' ? currentDuration : parseFloat(currentDuration);
+    if (isNaN(cur)) return null;
+
+    if (baselineDuration === null || baselineDuration === undefined || isNaN(baselineDuration) || baselineDuration <= 0) {
+        return {
+            isBaseline: true,
+            baselineValue: cur,
+            hasEquivalent: false
+        };
+    }
+
+    // 1. Difference = Current Duration - Baseline Duration
+    const diff = Math.round((cur - baselineDuration) * 100) / 100;
+    const diffSign = diff >= 0 ? '+' : '';
+    const diffFormatted = `${diffSign}${diff.toFixed(2)} ms`;
+
+    // 2. Difference % = ((Current Duration - Baseline Duration) / Baseline Duration) * 100
+    const diffPct = Math.round(((cur - baselineDuration) / baselineDuration) * 10000) / 100;
+    const diffPctSign = diffPct >= 0 ? '+' : '';
+    const diffPctFormatted = `${diffPctSign}${diffPct.toFixed(2)}%`;
+
+    // 3. Equivalent % = (Current Duration / Baseline Duration) * 100 (ONLY if Difference % > 30%)
+    const hasEquivalent = diffPct > 30;
+    let equivPct: number | undefined;
+    let equivPctFormatted: string | undefined;
+
+    if (hasEquivalent) {
+        equivPct = Math.round((cur / baselineDuration) * 10000) / 100;
+        equivPctFormatted = `${equivPct.toFixed(2)}%`;
+    }
+
+    return {
+        isBaseline: false,
+        baselineValue: baselineDuration,
+        diff,
+        diffFormatted,
+        diffPct,
+        diffPctFormatted,
+        hasEquivalent,
+        equivPct,
+        equivPctFormatted
+    };
+}
+
 export function calculateResult(
     parameter: string, 
     actualValue: number, 
     referenceValues?: ReferenceValues,
-    nerve?: string
-): { type: 'difference' | 'percentage'; value: number; unit: string; formatted: string; isAbnormal?: boolean } | null {
+    nerve?: string,
+    baselineValue?: number
+): { type: 'difference' | 'percentage'; value: number; unit: string; formatted: string; diffPctFormatted?: string; equivPctFormatted?: string; hasEquivalent?: boolean; isAbnormal?: boolean } | null {
     if (typeof actualValue !== 'number' || isNaN(actualValue)) {
         return null;
     }
 
-    const ref = getNerveReference(nerve, referenceValues);
+    const ref = {
+        latency: referenceValues?.latency ?? (nerve ? getNerveReference(nerve).latency : 4.4),
+        amplitude: referenceValues?.amplitude ?? (nerve ? getNerveReference(nerve).amplitude : 4.5),
+        velocity: referenceValues?.velocity ?? (nerve ? getNerveReference(nerve).velocity : 50)
+    };
     const param = parameter.toLowerCase();
 
     if (param === 'latency') {
         if (!ref.latency || ref.latency <= 0) return null;
-        const perc = (actualValue / ref.latency) * 100;
-        const rounded = Math.round(perc * 10) / 10;
+        const diff = actualValue - ref.latency;
+        const rounded = Math.round(diff * 100) / 100;
+        const sign = rounded >= 0 ? '+' : '';
         return {
-            type: 'percentage',
+            type: 'difference',
             value: rounded,
-            unit: '%',
-            formatted: `${rounded}%`,
-            isAbnormal: rounded > 125
+            unit: 'ms',
+            formatted: `${sign}${rounded.toFixed(2)} ms`,
+            isAbnormal: rounded > 0
         };
     }
 
     if (param === 'amplitude') {
         if (!ref.amplitude || ref.amplitude <= 0) return null;
         const perc = (actualValue / ref.amplitude) * 100;
-        const rounded = Math.round(perc * 10) / 10;
+        const rounded = Math.round(perc * 100) / 100;
+        const formatted = rounded % 1 === 0 ? `${rounded.toFixed(0)}%` : (Math.round(rounded * 10) / 10 === rounded ? `${rounded.toFixed(1)}%` : `${rounded.toFixed(2)}%`);
         return {
             type: 'percentage',
             value: rounded,
             unit: '%',
-            formatted: `${rounded}%`,
+            formatted,
             isAbnormal: rounded < 80
         };
     }
@@ -142,15 +198,97 @@ export function calculateResult(
     if (param === 'velocity') {
         if (!ref.velocity || ref.velocity <= 0) return null;
         const perc = (actualValue / ref.velocity) * 100;
-        const rounded = Math.round(perc);
+        const rounded = Math.round(perc * 100) / 100;
+        const formatted = rounded % 1 === 0 ? `${rounded.toFixed(0)}%` : (Math.round(rounded * 10) / 10 === rounded ? `${rounded.toFixed(1)}%` : `${rounded.toFixed(2)}%`);
         return {
             type: 'percentage',
             value: rounded,
             unit: '%',
-            formatted: `${rounded}%`,
+            formatted,
             isAbnormal: rounded < 80
         };
     }
 
+    if (param === 'duration') {
+        if (baselineValue === undefined || baselineValue === null || baselineValue <= 0) {
+            return null; // Baseline itself
+        }
+        const analysis = calculateDurationAnalysis(actualValue, baselineValue);
+        if (!analysis || analysis.isBaseline) return null;
+
+        return {
+            type: 'difference',
+            value: analysis.diff || 0,
+            unit: 'ms',
+            formatted: analysis.diffFormatted || '',
+            diffPctFormatted: analysis.diffPctFormatted,
+            equivPctFormatted: analysis.hasEquivalent ? analysis.equivPctFormatted : undefined,
+            hasEquivalent: analysis.hasEquivalent,
+            isAbnormal: analysis.hasEquivalent
+        };
+    }
+
     return null;
+}
+
+export function computeAnnotationCoordinates(
+    extractedValues: import('../types/report').ExtractedValue[],
+    calculatedValues: import('../types/report').CalculatedValue[]
+): import('../types/report').CalculatedValue[] {
+    const valuesByPage = new Map<number, import('../types/report').ExtractedValue[]>();
+    for (const ext of extractedValues) {
+        if (!ext.coordinates) continue;
+        const p = ext.coordinates.pageIndex ?? 0;
+        if (!valuesByPage.has(p)) valuesByPage.set(p, []);
+        valuesByPage.get(p)!.push(ext);
+    }
+
+    return calculatedValues.map(calc => {
+        const ext = extractedValues.find(e => e.id === calc.extractedId);
+        if (!ext || !ext.coordinates) return calc;
+
+        const { pageIndex, x, y, width, height } = ext.coordinates;
+        const pageValues = valuesByPage.get(pageIndex) || [];
+
+        // Estimate annotation text width (~3.2 pt per character at font size 5.2 pt)
+        const charCount = calc.formatted.length;
+        const approxFontSize = 5.2;
+        const approxWidth = Math.max(16, charCount * 3.2);
+
+        // Center horizontally above original value
+        const centerX = x + (width / 2);
+        const annotX = centerX - (approxWidth / 2);
+
+        // Collision protection against row above in same column
+        const rowsAbove = pageValues
+            .filter(o => o.id !== ext.id && o.coordinates && o.coordinates.y > y && Math.abs(o.coordinates.x - x) < 35)
+            .sort((a, b) => a.coordinates!.y - b.coordinates!.y);
+
+        const closestRowAbove = rowsAbove.length > 0 ? rowsAbove[0] : null;
+
+        // Base Y: above original value text top
+        let annotY = y + height + 1.2;
+
+        if (closestRowAbove && closestRowAbove.coordinates) {
+            const upperY = closestRowAbove.coordinates.y;
+            const gap = upperY - (y + height);
+            if (gap < approxFontSize + 1) {
+                // Squeeze in center of available gap
+                annotY = y + height + Math.max(0.4, (gap - approxFontSize) / 2);
+            } else if (annotY + approxFontSize > upperY - 0.5) {
+                annotY = upperY - approxFontSize - 0.5;
+            }
+        }
+
+        return {
+            ...calc,
+            coordinates: {
+                pageIndex,
+                x: annotX,
+                y: annotY,
+                width: approxWidth,
+                height: approxFontSize
+            }
+        };
+    });
 }

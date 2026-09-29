@@ -3,7 +3,7 @@ import { Upload, File, Loader2, FileUp, Sparkles, AlertCircle } from 'lucide-rea
 import { useNavigate } from 'react-router-dom';
 import { extractReportData as extractValuesFromFile } from '../services/extractionService';
 import { ReportStorage, SettingsStorage } from '../services/reportStorage';
-import { calculateResult } from '../utils/calculations';
+import { calculateResult, computeAnnotationCoordinates } from '../utils/calculations';
 import type { Report, CalculatedValue } from '../types/report';
 
 export default function UploadReport() {
@@ -50,6 +50,7 @@ export default function UploadReport() {
             const { 
                 values: extractedValues, 
                 groups: motorNcsGroups, 
+                fWaveRows,
                 physician, 
                 patientName, 
                 patientId, 
@@ -68,19 +69,40 @@ export default function UploadReport() {
             setStatus('Computing clinical differences...');
             const referenceValues = SettingsStorage.getReferences();
             
-            const calculatedValues: CalculatedValue[] = extractedValues.map(ext => {
-                const calc = calculateResult(ext.parameter, ext.value || 0, referenceValues);
+            // Map baseline duration for each nerve (first valid duration = baseline)
+            const baselineDurationByNerve = new Map<string, number>();
+            for (const ext of extractedValues) {
+                if (ext.parameter.toLowerCase() === 'duration' && ext.value !== null && !isNaN(ext.value)) {
+                    if (!baselineDurationByNerve.has(ext.nerve)) {
+                        baselineDurationByNerve.set(ext.nerve, ext.value);
+                    }
+                }
+            }
+
+            const rawCalculated: CalculatedValue[] = extractedValues.map(ext => {
+                const isDuration = ext.parameter.toLowerCase() === 'duration';
+                const baseline = isDuration ? baselineDurationByNerve.get(ext.nerve) : undefined;
+                const calc = calculateResult(ext.parameter, ext.value || 0, referenceValues, ext.nerve, baseline);
                 return {
                     extractedId: ext.id,
                     type: calc?.type || 'difference',
                     value: calc?.value || 0,
                     unit: calc?.unit || '',
-                    formatted: calc?.formatted || ''
+                    formatted: calc?.formatted || '',
+                    diffPctFormatted: calc?.diffPctFormatted,
+                    equivPctFormatted: calc?.equivPctFormatted,
+                    isAbnormal: calc?.isAbnormal
                 };
             });
+            const calculatedValues = computeAnnotationCoordinates(extractedValues, rawCalculated);
             
             setStatus('Finalizing report layout...');
-            const fileData = await file.arrayBuffer();
+            let fileData: ArrayBuffer | undefined = undefined;
+            try {
+                fileData = await file.arrayBuffer();
+            } catch (bufErr) {
+                console.warn("Could not read file arrayBuffer:", bufErr);
+            }
             
             const newReport: Report = {
                 id: `report_${Date.now()}`,
@@ -104,17 +126,22 @@ export default function UploadReport() {
                 extractedValues,
                 calculatedValues,
                 motorNcsGroups,
+                fWaveRows,
                 analysisStatus: 'completed',
                 fileData,
                 fileType: file.type
             };
             
-            await ReportStorage.saveReport(newReport);
+            try {
+                await ReportStorage.saveReport(newReport);
+            } catch (saveErr) {
+                console.warn("ReportStorage save warning:", saveErr);
+            }
             navigate(`/analysis/${newReport.id}`);
             
         } catch (error) {
             console.error("Error processing file:", error);
-            alert("An error occurred while processing the file.");
+            alert("An error occurred while processing the file: " + (error instanceof Error ? error.message : String(error)));
         } finally {
             setIsProcessing(false);
             setStatus('');
