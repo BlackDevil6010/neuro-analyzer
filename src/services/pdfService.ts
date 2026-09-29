@@ -2,7 +2,7 @@ import { PDFDocument, rgb, StandardFonts } from 'pdf-lib';
 import type { Report, MotorNCSGroup, FWaveRow } from '../types/report';
 import { getDefaultMotorNCSGroups, getDefaultFWaveRows } from './extractionService';
 import { DEFAULT_LOGO_RAW_BASE64 } from '../assets/logoBase64';
-import { getNerveReference } from '../utils/calculations';
+import { getNerveReference, calculateDurationAnalysis } from '../utils/calculations';
 
 function base64ToUint8Array(base64: string): Uint8Array {
     const raw = base64.replace(/^data:image\/[a-z]+;base64,/, '');
@@ -202,7 +202,7 @@ export async function generateAnalyzedPDF(report: Report): Promise<Blob> {
     curY -= 8;
 
     // 9-Column Medical Table Setup (Total = 495 pt)
-    const colWidths = [76, 62, 58, 36, 36, 96, 42, 51, 38];
+    const colWidths = [74, 58, 54, 68, 34, 72, 42, 55, 38];
     const colHeaders = [
         { title: 'Nerve / Sites', unit: '' },
         { title: 'Latency', unit: 'ms' },
@@ -270,6 +270,25 @@ export async function generateAnalyzedPDF(report: Report): Promise<Blob> {
     };
 
     const groups: MotorNCSGroup[] = report.motorNcsGroups || getDefaultMotorNCSGroups();
+
+    // Ensure Duration Analysis is computed for all groups (FIRST valid duration = Baseline)
+    for (const grp of groups) {
+        let baselineDuration: number | null = null;
+        for (const site of grp.sites) {
+            if (typeof site.duration === 'number' && !isNaN(site.duration)) {
+                if (baselineDuration === null) {
+                    baselineDuration = site.duration;
+                    if (!site.durationAnalysis) {
+                        site.durationAnalysis = { isBaseline: true, baselineValue: site.duration, hasEquivalent: false };
+                    }
+                } else {
+                    if (!site.durationAnalysis || site.durationAnalysis.isBaseline) {
+                        site.durationAnalysis = calculateDurationAnalysis(site.duration, baselineDuration) || undefined;
+                    }
+                }
+            }
+        }
+    }
 
     for (const grp of groups) {
         ensureSpace(groupH + rowH);
@@ -353,15 +372,26 @@ export async function generateAnalyzedPDF(report: Report): Promise<Blob> {
                 drawRight(currentPage, val.toFixed(1), cRight - 4, curY - 10, 7.5, font, rgb(0, 0, 0));
             }
 
-            // Col 3: Duration (Right-aligned)
+            // Col 3: Duration (with difference badge on left, numeric value on right)
             cLeft = cRight;
             cRight = cLeft + colWidths[3];
-            if (s.duration === 'NR') {
-                drawColCenter(currentPage, 'NR', cLeft, colWidths[3], curY - 10, 7.5, font, rgb(0.5, 0.5, 0.5));
-            } else if (s.duration !== null && s.duration !== undefined) {
-                drawRight(currentPage, `${s.duration}`, cRight - 4, curY - 10, 7.5, font, rgb(0.2, 0.2, 0.2));
+            if (s.duration === 'NR' || s.duration === null || s.duration === undefined) {
+                drawColCenter(currentPage, s.duration === 'NR' ? 'NR' : '-', cLeft, colWidths[3], curY - 10, 7.5, font, rgb(0.5, 0.5, 0.5));
             } else {
-                drawColCenter(currentPage, '-', cLeft, colWidths[3], curY - 10, 7.5, font, rgb(0.5, 0.5, 0.5));
+                const val = typeof s.duration === 'number' ? s.duration : parseFloat(s.duration as string);
+                if (s.durationAnalysis && !s.durationAnalysis.isBaseline && s.durationAnalysis.diffFormatted) {
+                    const diffStr = s.durationAnalysis.diffFormatted;
+                    const badgeText = s.durationAnalysis.hasEquivalent && s.durationAnalysis.equivPctFormatted
+                        ? `(${diffStr} ${s.durationAnalysis.equivPctFormatted})`
+                        : `(${diffStr})`;
+                    const badgeColor = (s.durationAnalysis.diff ?? 0) > 0 
+                        ? (s.durationAnalysis.hasEquivalent ? rgb(0.5, 0.1, 0.6) : rgb(0.7, 0.2, 0)) 
+                        : rgb(0.2, 0.35, 0.5);
+                    const bSize = s.durationAnalysis.hasEquivalent ? 5 : 5.5;
+                    currentPage.drawText(badgeText, { x: cLeft + 2, y: curY - 10, size: bSize, font: fontBold, color: badgeColor });
+                }
+                const valStr = isNaN(val) ? `${s.duration}` : val.toFixed(2);
+                drawRight(currentPage, valStr, cRight - 4, curY - 10, 7.5, font, rgb(0, 0, 0));
             }
 
             // Col 4: Rel Amp (Right-aligned, or centered if NR)
