@@ -14,92 +14,6 @@ function base64ToUint8Array(base64: string): Uint8Array {
     return bytes;
 }
 
-function overlayPage1Annotations(page1: any, report: Report, fontBold: any) {
-    // 1. Overlay Duration Analysis directly near/above original Duration value
-    const motorGroups = report.motorNcsGroups || getDefaultMotorNCSGroups();
-    for (const grp of motorGroups) {
-        for (const site of grp.sites) {
-            if (!site.durationAnalysis || site.durationAnalysis.isBaseline) continue;
-
-            // Find OCR coordinates of this duration value
-            let targetExt = report.extractedValues.find(e => e.id === site.durationValId);
-            if (!targetExt) {
-                targetExt = report.extractedValues.find(e => 
-                    e.parameter.toLowerCase() === 'duration' && 
-                    (e.nerve === grp.nerve || e.nerve === grp.groupName) &&
-                    e.site === site.site
-                );
-            }
-            if (!targetExt || !targetExt.coordinates) continue;
-
-            const { x, y, width } = targetExt.coordinates;
-            const centerX = x + (width / 2);
-            const fontSize = 3.2;
-
-            if (site.durationAnalysis.hasEquivalent && site.durationAnalysis.equivPctFormatted) {
-                // 3 stacked lines above original duration value (Rule 11):
-                //   +1.94 ms
-                //   +38.65%
-                //  138.65%
-                //     6.96
-                const lines = [
-                    { text: site.durationAnalysis.diffFormatted, color: rgb(0.06, 0.2, 0.6) },
-                    { text: site.durationAnalysis.diffPctFormatted, color: rgb(0.7, 0.2, 0) },
-                    { text: site.durationAnalysis.equivPctFormatted, color: rgb(0.4, 0.1, 0.6) }
-                ];
-                const yBot = y + 3.2;
-                lines.forEach((l, idx) => {
-                    if (!l.text) return;
-                    const textW = fontBold.widthOfTextAtSize(l.text, fontSize);
-                    const lx = centerX - textW / 2;
-                    const ly = yBot + (2 - idx) * 3.2;
-                    page1.drawText(l.text, { x: lx, y: ly, size: fontSize, font: fontBold, color: l.color });
-                });
-            } else if (site.durationAnalysis.diffFormatted && site.durationAnalysis.diffPctFormatted) {
-                // 2 stacked lines above original duration value (Rule 11):
-                //   -0.34 ms
-                //   -7.66%
-                //     4.10
-                const lines = [
-                    { text: site.durationAnalysis.diffFormatted, color: rgb(0.2, 0.25, 0.35) },
-                    { text: site.durationAnalysis.diffPctFormatted, color: rgb(0.2, 0.25, 0.35) }
-                ];
-                const yBot = y + 3.4;
-                lines.forEach((l, idx) => {
-                    if (!l.text) return;
-                    const textW = fontBold.widthOfTextAtSize(l.text, fontSize);
-                    const lx = centerX - textW / 2;
-                    const ly = yBot + (1 - idx) * 3.2;
-                    page1.drawText(l.text, { x: lx, y: ly, size: fontSize, font: fontBold, color: l.color });
-                });
-            }
-        }
-    }
-
-    // 2. Overlay existing Latency, Amplitude, and Velocity calculations on Page 1 (Rule 12)
-    if (report.calculatedValues) {
-        for (const calc of report.calculatedValues) {
-            const ext = report.extractedValues.find(e => e.id === calc.extractedId);
-            if (!ext || !ext.coordinates || !calc.formatted) continue;
-            const param = ext.parameter.toLowerCase();
-            if (param === 'duration') continue; // Handled specifically above
-
-            const fontSize = 4.2;
-            const textW = fontBold.widthOfTextAtSize(calc.formatted, fontSize);
-            const centerX = ext.coordinates.x + (ext.coordinates.width / 2);
-            const lx = centerX - (textW / 2);
-            const ly = ext.coordinates.y + 7.5;
-
-            let color = rgb(0.1, 0.1, 0.1);
-            if (param === 'latency') color = rgb(0.05, 0.35, 0.8);
-            if (param === 'amplitude') color = rgb(0.05, 0.5, 0.2);
-            if (param === 'velocity') color = rgb(0.0, 0.5, 0.5);
-
-            page1.drawText(calc.formatted, { x: lx, y: ly, size: fontSize, font: fontBold, color });
-        }
-    }
-}
-
 export async function generateAnalyzedPDF(report: Report): Promise<Blob> {
     const pdfDoc = await PDFDocument.create();
     const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -269,15 +183,8 @@ export async function generateAnalyzedPDF(report: Report): Promise<Blob> {
     // ==========================================
     // PAGE 1: ANALYZED MOTOR NCS REPORT
     // ==========================================
-    if (srcDoc && srcDoc.getPageCount() > 0) {
-        // Section 11: Keep original hospital PDF unchanged, do not create another page, do not recreate table
-        const [page1] = await pdfDoc.copyPages(srcDoc, [0]);
-        pdfDoc.addPage(page1);
-
-        overlayPage1Annotations(page1, report, fontBold);
-    } else {
-        const page1 = pdfDoc.addPage([pageWidth, pageHeight]);
-        let curY = drawHeaderAndPatientInfo(page1, 766);
+    const page1 = pdfDoc.addPage([pageWidth, pageHeight]);
+    let curY = drawHeaderAndPatientInfo(page1, 766);
 
     // Section Title Bar
     curY -= 16;
@@ -446,15 +353,12 @@ export async function generateAnalyzedPDF(report: Report): Promise<Blob> {
                 drawRight(currentPage, val.toFixed(1), cRight - 4, curY - 10, 7.5, font, rgb(0, 0, 0));
             }
 
-            // Col 3: Duration (with difference if not baseline)
+            // Col 3: Duration (Right-aligned)
             cLeft = cRight;
             cRight = cLeft + colWidths[3];
             if (s.duration === 'NR') {
                 drawColCenter(currentPage, 'NR', cLeft, colWidths[3], curY - 10, 7.5, font, rgb(0.5, 0.5, 0.5));
             } else if (s.duration !== null && s.duration !== undefined) {
-                if (s.durationAnalysis && !s.durationAnalysis.isBaseline && s.durationAnalysis.diffFormatted) {
-                    currentPage.drawText(`(${s.durationAnalysis.diffFormatted})`, { x: cLeft + 2, y: curY - 10, size: 5.5, font: fontBold, color: rgb(0.5, 0.2, 0.1) });
-                }
                 drawRight(currentPage, `${s.duration}`, cRight - 4, curY - 10, 7.5, font, rgb(0.2, 0.2, 0.2));
             } else {
                 drawColCenter(currentPage, '-', cLeft, colWidths[3], curY - 10, 7.5, font, rgb(0.5, 0.5, 0.5));
@@ -512,9 +416,8 @@ export async function generateAnalyzedPDF(report: Report): Promise<Blob> {
         }
     }
 
-        // Page 1 Footer: "1 of 3"
-        drawCenterPage(page1, `1 of ${totalPagesStr}`, 35, 9, font, rgb(0.3, 0.35, 0.4));
-    }
+    // Page 1 Footer: "1 of 3"
+    drawCenterPage(page1, `1 of ${totalPagesStr}`, 35, 9, font, rgb(0.3, 0.35, 0.4));
 
     // ==========================================
     // PAGE 2: SENSORY NCS (Copied or Generated)
